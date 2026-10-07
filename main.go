@@ -2,17 +2,29 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"fmt"
 	"html/template"
+	"os"
 	"sync"
 	"time"
 )
 
+// Recipient represents a target email address (unchanged from original).
 type Recipient struct {
 	Name  string
 	Email string
 }
 
+// EmailJob carries a database-tracked job through the channel.
+type EmailJob struct {
+	ID        string
+	Recipient Recipient
+}
+
+// FailedJob captures failure context for the Dead Letter Queue.
 type FailedJob struct {
+	JobID     string
 	Recipient Recipient
 	Reason    string
 	Error     string
@@ -20,21 +32,63 @@ type FailedJob struct {
 }
 
 func main() {
+	// Load configuration from environment variables / .env
+	cfg := LoadConfig()
 
-	recipientChan := make(chan Recipient)
+	// Handle "migrate" subcommand: go run . migrate [down]
+	if len(os.Args) > 1 && os.Args[1] == "migrate" {
+		db, err := InitDB(cfg)
+		if err != nil {
+			fmt.Printf("❌ Database connection failed: %v\n", err)
+			os.Exit(1)
+		}
+		defer db.Close()
+
+		direction := "up"
+		if len(os.Args) > 2 && os.Args[2] == "down" {
+			direction = "down"
+		}
+		fmt.Printf("Running migrations (%s)...\n", direction)
+		if err := RunMigrations(db, direction); err != nil {
+			fmt.Printf("❌ Migration failed: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("✅ Migrations complete")
+		return
+	}
+
+	// Initialize database connection pool
+	db, err := InitDB(cfg)
+	if err != nil {
+		fmt.Printf("❌ Database connection failed: %v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+	fmt.Printf("✅ Database connected (pool: maxOpen=%d, maxIdle=%d)\n",
+		cfg.DBMaxOpenConns, cfg.DBMaxIdleConns)
+
+	repo := NewEmailJobRepo(db)
+
+	// Channels — same pattern as original, now carrying EmailJob instead of Recipient
+	jobChan := make(chan EmailJob)
 	dlqChan := make(chan FailedJob)
 
+	// Producer goroutine
 	go func() {
-		loadRecipient("emails.csv", recipientChan)
+		if err := loadRecipients(context.Background(), repo, "emails.csv", jobChan); err != nil {
+			fmt.Printf("Producer error: %v\n", err)
+		}
 	}()
 
+	// 3 consumer workers (unchanged count)
 	var workerWg sync.WaitGroup
 	workerCount := 3
 	for i := 1; i <= workerCount; i++ {
 		workerWg.Add(1)
-		go emailWorker(i, recipientChan, dlqChan, &workerWg)
+		go emailWorker(i, cfg, repo, jobChan, dlqChan, &workerWg)
 	}
 
+	// DLQ worker
 	var dlqWg sync.WaitGroup
 	dlqWg.Add(1)
 	go dlqWorker(dlqChan, &dlqWg)
@@ -47,7 +101,6 @@ func main() {
 
 	// Wait for DLQ worker to finish flushing failed emails to disk
 	dlqWg.Wait()
-
 }
 
 func executeTemplate(r Recipient) (string, error) {

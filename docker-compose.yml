@@ -1,0 +1,29 @@
+services:
+  mailpit:
+    image: axllent/mailpit
+    container_name: mailpit
+    restart: unless-stopped
+    ports:
+      - "8025:8025"
+      - "1025:1025"
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: email_dispatcher_db
+    restart: unless-stopped
+    ports:
+      - "${DB_PORT:-5433}:5432"
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+      POSTGRES_DB: ${DB_NAME:-email_dispatcher}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-email_dispatcher}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:

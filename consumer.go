@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/csv"
 	"fmt"
 	"net/smtp"
@@ -9,16 +10,32 @@ import (
 	"time"
 )
 
-func emailWorker(id int, ch chan Recipient, dlqChan chan FailedJob, wg *sync.WaitGroup) {
+// emailWorker processes email jobs from the channel.
+// For each job it: marks as processing → renders template → sends via SMTP → marks as sent/failed.
+// The existing Mailpit SMTP sending logic is preserved.
+func emailWorker(id int, cfg *Config, repo *EmailJobRepo, ch chan EmailJob, dlqChan chan FailedJob, wg *sync.WaitGroup) {
 	defer wg.Done()
-	for r := range ch {
-		smtpHost := "localhost"
-		smtpPort := "1025"
+	for job := range ch {
+		ctx := context.Background()
+		r := job.Recipient
 
+		// Mark as processing in database
+		if err := repo.MarkProcessing(ctx, job.ID); err != nil {
+			fmt.Printf("Worker %d: failed to mark processing for %s: %v\n", id, r.Email, err)
+		}
+
+		// Render email template (existing logic)
 		msg, err := executeTemplate(r)
 		if err != nil {
 			fmt.Printf("Worker %d: template error for %s: %v\n", id, r.Email, err)
+
+			// Mark as failed in database
+			if dbErr := repo.MarkFailed(ctx, job.ID, err.Error()); dbErr != nil {
+				fmt.Printf("Worker %d: failed to mark failed for %s: %v\n", id, r.Email, dbErr)
+			}
+
 			dlqChan <- FailedJob{
+				JobID:     job.ID,
 				Recipient: r,
 				Reason:    "TEMPLATE_ERROR",
 				Error:     err.Error(),
@@ -27,8 +44,9 @@ func emailWorker(id int, ch chan Recipient, dlqChan chan FailedJob, wg *sync.Wai
 			continue
 		}
 
+		// Send via SMTP to Mailpit (existing logic, now using config)
 		err = smtp.SendMail(
-			smtpHost+":"+smtpPort,
+			cfg.SMTPHost+":"+cfg.SMTPPort,
 			nil,
 			"admin@gmail.com",
 			[]string{r.Email},
@@ -36,7 +54,14 @@ func emailWorker(id int, ch chan Recipient, dlqChan chan FailedJob, wg *sync.Wai
 		)
 		if err != nil {
 			fmt.Printf("Worker %d: send error for %s: %v\n", id, r.Email, err)
+
+			// Mark as failed in database
+			if dbErr := repo.MarkFailed(ctx, job.ID, err.Error()); dbErr != nil {
+				fmt.Printf("Worker %d: failed to mark failed for %s: %v\n", id, r.Email, dbErr)
+			}
+
 			dlqChan <- FailedJob{
+				JobID:     job.ID,
 				Recipient: r,
 				Reason:    "SMTP_ERROR",
 				Error:     err.Error(),
@@ -44,12 +69,20 @@ func emailWorker(id int, ch chan Recipient, dlqChan chan FailedJob, wg *sync.Wai
 			}
 			continue
 		}
+
+		// Mark as sent in database with the rendered body
+		if dbErr := repo.MarkSent(ctx, job.ID, msg); dbErr != nil {
+			fmt.Printf("Worker %d: failed to mark sent for %s: %v\n", id, r.Email, dbErr)
+		}
+
 		time.Sleep(50 * time.Millisecond)
 
 		fmt.Printf("Email sent to %s by worker %d\n", r.Email, id)
 	}
 }
 
+// dlqWorker captures failed email jobs and writes them to a CSV file.
+// Preserved from the original implementation with JobID column added.
 func dlqWorker(dlqChan chan FailedJob, wg *sync.WaitGroup) {
 	defer wg.Done()
 
@@ -71,7 +104,7 @@ func dlqWorker(dlqChan chan FailedJob, wg *sync.WaitGroup) {
 
 	// Write header row if file is brand new
 	if !fileExists {
-		writer.Write([]string{"Name", "Email", "Reason", "Error", "Timestamp"})
+		writer.Write([]string{"Name", "Email", "Reason", "Error", "Timestamp", "JobID"})
 	}
 
 	failureCount := 0
@@ -84,6 +117,7 @@ func dlqWorker(dlqChan chan FailedJob, wg *sync.WaitGroup) {
 			job.Reason,
 			job.Error,
 			job.Timestamp.Format(time.RFC3339),
+			job.JobID,
 		})
 	}
 
