@@ -22,11 +22,23 @@ type Config struct {
 	DBPassword string
 	DBSSLMode  string
 
-	// Connection Pool
+	// PostgreSQL Connection Pool
 	DBMaxOpenConns    int
 	DBMaxIdleConns    int
 	DBConnMaxLifetime time.Duration
 	DBConnMaxIdleTime time.Duration
+
+	// Redis
+	RedisHost         string
+	RedisPort         string
+	RedisPassword     string
+	RedisPoolSize     int
+	RedisMinIdleConns int
+	RedisDialTimeout  time.Duration
+
+	// Rate Limiting
+	EmailRateLimit  int
+	EmailRateWindow time.Duration
 }
 
 // LoadConfig reads environment variables (with .env fallback) and returns a Config.
@@ -49,6 +61,16 @@ func LoadConfig() *Config {
 		DBMaxIdleConns:    getEnvInt("DB_MAX_IDLE_CONNS", 5),
 		DBConnMaxLifetime: getEnvDuration("DB_CONN_MAX_LIFETIME", 30*time.Minute),
 		DBConnMaxIdleTime: getEnvDuration("DB_CONN_MAX_IDLE_TIME", 5*time.Minute),
+
+		RedisHost:         getEnv("REDIS_HOST", "localhost"),
+		RedisPort:         getEnv("REDIS_PORT", "6379"),
+		RedisPassword:     getEnv("REDIS_PASSWORD", ""),
+		RedisPoolSize:     getEnvInt("REDIS_POOL_SIZE", 5),
+		RedisMinIdleConns: getEnvInt("REDIS_MIN_IDLE_CONNS", 2),
+		RedisDialTimeout:  getEnvDuration("REDIS_DIAL_TIMEOUT", 5*time.Second),
+
+		EmailRateLimit:  getEnvInt("EMAIL_RATE_LIMIT", 10),
+		EmailRateWindow: getEnvDuration("EMAIL_RATE_WINDOW", 1*time.Second),
 	}
 }
 

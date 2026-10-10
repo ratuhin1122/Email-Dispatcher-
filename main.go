@@ -69,6 +69,20 @@ func main() {
 
 	repo := NewEmailJobRepo(db)
 
+	// Initialize Redis client and rate limiter.
+	// Redis is non-fatal: if unavailable, the app continues without rate limiting
+	// (fail-open strategy — no email jobs are lost).
+	var rl *RateLimiter
+	redisClient, err := InitRedis(cfg)
+	if err != nil {
+		fmt.Printf("⚠️  Redis connection failed (continuing without rate limiting): %v\n", err)
+	} else {
+		defer redisClient.Close()
+		rl = NewRateLimiter(redisClient, cfg.EmailRateLimit, cfg.EmailRateWindow)
+		fmt.Printf("✅ Redis connected (pool: size=%d, minIdle=%d) — rate limit: %d emails per %s\n",
+			cfg.RedisPoolSize, cfg.RedisMinIdleConns, cfg.EmailRateLimit, cfg.EmailRateWindow)
+	}
+
 	// Channels — same pattern as original, now carrying EmailJob instead of Recipient
 	jobChan := make(chan EmailJob)
 	dlqChan := make(chan FailedJob)
@@ -85,7 +99,7 @@ func main() {
 	workerCount := 3
 	for i := 1; i <= workerCount; i++ {
 		workerWg.Add(1)
-		go emailWorker(i, cfg, repo, jobChan, dlqChan, &workerWg)
+		go emailWorker(i, cfg, repo, rl, jobChan, dlqChan, &workerWg)
 	}
 
 	// DLQ worker

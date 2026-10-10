@@ -11,9 +11,10 @@ import (
 )
 
 // emailWorker processes email jobs from the channel.
-// For each job it: marks as processing → renders template → sends via SMTP → marks as sent/failed.
+// For each job it: marks as processing → renders template → waits for rate limit → sends via SMTP → marks as sent/failed.
 // The existing Mailpit SMTP sending logic is preserved.
-func emailWorker(id int, cfg *Config, repo *EmailJobRepo, ch chan EmailJob, dlqChan chan FailedJob, wg *sync.WaitGroup) {
+// The rate limiter is shared across all consumers via Redis.
+func emailWorker(id int, cfg *Config, repo *EmailJobRepo, rl *RateLimiter, ch chan EmailJob, dlqChan chan FailedJob, wg *sync.WaitGroup) {
 	defer wg.Done()
 	for job := range ch {
 		ctx := context.Background()
@@ -42,6 +43,16 @@ func emailWorker(id int, cfg *Config, repo *EmailJobRepo, ch chan EmailJob, dlqC
 				Timestamp: time.Now(),
 			}
 			continue
+		}
+
+		// Wait for rate limiter clearance (shared across all consumers via Redis).
+		// If Redis is unavailable and failOpen=true, this returns immediately.
+		// If the rate limit is exceeded, this blocks with exponential backoff
+		// until the window resets — no jobs are lost.
+		if rl != nil {
+			if err := rl.Wait(ctx); err != nil {
+				fmt.Printf("Worker %d: rate limiter error for %s: %v\n", id, r.Email, err)
+			}
 		}
 
 		// Send via SMTP to Mailpit (existing logic, now using config)

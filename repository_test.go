@@ -195,7 +195,7 @@ func TestEmailWorkerFailure(t *testing.T) {
 	close(jobChan)
 
 	wg.Add(1)
-	go emailWorker(1, badCfg, repo, jobChan, dlqChan, &wg)
+	go emailWorker(1, badCfg, repo, nil, jobChan, dlqChan, &wg)
 	wg.Wait()
 	close(dlqChan)
 
